@@ -1,0 +1,493 @@
+From 298b41a370b1b2c8689e58d1b0433d03676c9674 Mon Sep 17 00:00:00 2001
+From: Danylo Piliaiev <dpiliaiev@igalia.com>
+Date: Wed, 26 Feb 2025 21:44:53 +0100
+Subject: [PATCH 1/2] tu/lrz: Improve LRZ around stencil tests and reads_dest
+ cases
+
+We were a bit too conservative and fully disabled LRZ for when stencil
+or blending were involved. There is no need to fully disable LRZ
+in those cases, only LRZ writes should be disabled.
+
+The final rules are:
+ LRZ is DISABLED until depth attachment is cleared when:
+   - Depth Write + changing direction of depth test
+      e.g. from OP_GREATER to OP_LESS;
+   - Depth Write + OP_ALWAYS or OP_NOT_EQUAL;
+   - Clearing depth with vkCmdClearAttachments;
+   - Depth image is a target of blit commands.
+   - (pre-a650) Not clearing depth attachment with LOAD_OP_CLEAR;
+   - (pre-a650) Using secondary command buffers;
+ LRZ WRITE is DISABLED until depth attachment is cleared when:
+   - Depth Write + blending (color blend, logic ops, partial color mask, etc.);
+   - Fragment may be killed by stencil;
+ LRZ is disabled for CURRENT draw when:
+   - Fragment shader side-effects (writing to SSBOs, atomic operations, etc);
+   - Fragment shader writes depth or stencil;
+ LRZ WRITE is DISABLED (via LATE_Z) for CURRENT draw when:
+   - Fragment may be via killed alpha-to-coverage, discard, sample coverage;
+
+Signed-off-by: Danylo Piliaiev <dpiliaiev@igalia.com>
+---
+ src/freedreno/registers/adreno/a6xx.xml       |   2 +-
+ src/freedreno/vulkan/tu_cmd_buffer.cc         |  14 +-
+ src/freedreno/vulkan/tu_cmd_buffer.h          |   1 +
+ src/freedreno/vulkan/tu_lrz.cc                | 203 ++++++++++--------
+ src/freedreno/vulkan/tu_lrz.h                 |   4 +
+ src/freedreno/vulkan/tu_tracepoints.py        |   3 +-
+ .../drivers/freedreno/a6xx/fd6_emit.cc        |   4 +-
+ 7 files changed, 137 insertions(+), 94 deletions(-)
+
+diff --git a/src/freedreno/registers/adreno/a6xx.xml b/src/freedreno/registers/adreno/a6xx.xml
+index d49919f6344c0..669e4955444cd 100644
+--- a/src/freedreno/registers/adreno/a6xx.xml
++++ b/src/freedreno/registers/adreno/a6xx.xml
+@@ -3355,7 +3355,7 @@ to upconvert to 32b float internally?
+ 		</doc>
+ 		<bitfield name="FC_ENABLE" pos="3" type="boolean" variants="A6XX"/>
+ 		<!-- set when depth-test + depth-write enabled -->
+-		<bitfield name="Z_TEST_ENABLE" pos="4" type="boolean"/>
++		<bitfield name="Z_WRITE_ENABLE" pos="4" type="boolean"/>
+ 		<bitfield name="Z_BOUNDS_ENABLE" pos="5" type="boolean"/>
+ 		<bitfield name="DIR" low="6" high="7" type="a6xx_lrz_dir_status"/>
+ 		<doc>
+diff --git a/src/freedreno/vulkan/tu_cmd_buffer.cc b/src/freedreno/vulkan/tu_cmd_buffer.cc
+index 33d1f1fdc62f0..06a9025fcc085 100644
+--- a/src/freedreno/vulkan/tu_cmd_buffer.cc
++++ b/src/freedreno/vulkan/tu_cmd_buffer.cc
+@@ -2046,12 +2046,19 @@ tu_trace_end_render_pass(struct tu_cmd_buffer *cmd, bool gmem)
+                     offsetof(fd_lrzfc_layout<CHIP>, dir_track);
+    }
+ 
++   int32_t lrz_disabled_at_draw = cmd->state.rp.lrz_disabled_at_draw
++                                     ? cmd->state.rp.lrz_disabled_at_draw
++                                     : -1;
++   int32_t lrz_write_disabled_at_draw = cmd->state.rp.lrz_write_disabled_at_draw
++                                     ? cmd->state.rp.lrz_write_disabled_at_draw
++                                     : -1;
+    trace_end_render_pass(&cmd->trace, &cmd->cs, gmem,
+                          cmd->state.rp.gmem_disable_reason,
+                          cmd->state.rp.drawcall_count,
+                          avg_per_sample_bandwidth, cmd->state.lrz.valid,
+                          cmd->state.rp.lrz_disable_reason,
+-                         cmd->state.rp.lrz_disabled_at_draw, addr);
++                         lrz_disabled_at_draw,
++                         lrz_write_disabled_at_draw, addr);
+ }
+ 
+ static void
+@@ -4501,6 +4508,11 @@ tu_render_pass_state_merge(struct tu_render_pass_state *dst,
+       dst->lrz_disabled_at_draw =
+          dst->drawcall_count + src->lrz_disabled_at_draw;
+    }
++   if (!dst->lrz_write_disabled_at_draw &&
++       src->lrz_write_disabled_at_draw) {
++      dst->lrz_write_disabled_at_draw =
++         dst->drawcall_count + src->lrz_write_disabled_at_draw;
++   }
+    if (!dst->gmem_disable_reason && src->gmem_disable_reason) {
+       dst->gmem_disable_reason = src->gmem_disable_reason;
+    }
+diff --git a/src/freedreno/vulkan/tu_cmd_buffer.h b/src/freedreno/vulkan/tu_cmd_buffer.h
+index 958166eb36ac9..ddfe7dade91cb 100644
+--- a/src/freedreno/vulkan/tu_cmd_buffer.h
++++ b/src/freedreno/vulkan/tu_cmd_buffer.h
+@@ -321,6 +321,7 @@ struct tu_render_pass_state
+ 
+    const char *lrz_disable_reason;
+    uint32_t lrz_disabled_at_draw;
++   uint32_t lrz_write_disabled_at_draw;
+ 
+    const char *gmem_disable_reason;
+ };
+diff --git a/src/freedreno/vulkan/tu_lrz.cc b/src/freedreno/vulkan/tu_lrz.cc
+index 877762e9483eb..43bce395b2b01 100644
+--- a/src/freedreno/vulkan/tu_lrz.cc
++++ b/src/freedreno/vulkan/tu_lrz.cc
+@@ -15,16 +15,47 @@
+ 
+ /* See lrz.rst for how HW works. Here are only the implementation notes.
+  *
+- * There are a number of limitations when LRZ cannot be used:
+- * - Fragment shader side-effects (writing to SSBOs, atomic operations, etc);
+- * - Writing to stencil buffer
+- * - Writing depth while:
+- *   - Changing direction of depth test (e.g. from OP_GREATER to OP_LESS);
+- *   - Using OP_ALWAYS or OP_NOT_EQUAL;
+- * - Clearing depth with vkCmdClearAttachments;
+- * - (pre-a650) Not clearing depth attachment with LOAD_OP_CLEAR;
+- * - (pre-a650) Using secondary command buffers;
+- * - Sysmem rendering (with small caveat).
++ * LRZ, Depth Test, and Stencil Test
++ * =================================
++ *
++ * LRZ works in both binning and direct rendering modes.
++ *
++ *               LRZ Test -> LRZ Write (in binning)
++ *                  v
++ *               Early Stencil Test -> Stencil Write
++ *                  v
++ *               Early Depth Test -> Depth Write + LRZ feedback
++ *                                 + Stencil depthFailOp
++ *                  v
++ * (!FS_DISABLE) Fragment Shader
++ *                  v
++ * (!FS_DISABLE) Late Stencil Test -> Stencil Write
++ *                  v
++ * (!FS_DISABLE) Late Depth Test -> Depth Write + LRZ feedback
++ *                                + Stencil depthFailOp
++ *
++ * Keep the above in mind, when LRZ test fails, no other operations
++ * are performed. Especially important with stencil.
++ *
++ * LRZ is DISABLED until depth attachment is cleared when:
++ *   - Depth Write + changing direction of depth test
++ *      e.g. from OP_GREATER to OP_LESS;
++ *   - Depth Write + OP_ALWAYS or OP_NOT_EQUAL;
++ *   - Clearing depth with vkCmdClearAttachments;
++ *   - Depth image is a target of blit commands.
++ *   - (pre-a650) Not clearing depth attachment with LOAD_OP_CLEAR;
++ *   - (pre-a650) Using secondary command buffers;
++ * LRZ WRITE is DISABLED until depth attachment is cleared when:
++ *   - Depth Write + blending (color blend, logic ops, partial color mask, etc.);
++ *   - Fragment may be killed by stencil;
++ * LRZ is disabled for CURRENT draw when:
++ *   - Fragment shader side-effects (writing to SSBOs, atomic operations, etc);
++ *   - Fragment shader writes depth or stencil;
++ * LRZ WRITE is DISABLED (via LATE_Z) for CURRENT draw when:
++ *   - Fragment may be via killed alpha-to-coverage, discard, sample coverage;
++ *
++ * There is a documentation on LRZ rules in QCOM's driver:
++ *  https://docs.qualcomm.com/bundle/publicresource/topics/80-78185-2/best_practices.html?product=1601111740035277#lrz-do-not-disable
+  *
+  * A650+ (gen3+)
+  * =============
+@@ -60,6 +91,15 @@ tu_lrz_disable_reason(struct tu_cmd_buffer *cmd, const char *reason) {
+               cmd->state.rp.lrz_disabled_at_draw);
+ }
+ 
++static inline void
++tu_lrz_write_disable_reason(struct tu_cmd_buffer *cmd, const char *reason) {
++   cmd->state.rp.lrz_write_disabled_at_draw = cmd->state.rp.drawcall_count;
++   perf_debug(
++      cmd->device,
++      "Disabling LRZ write for the rest of the RP because '%s' at draw %u",
++      reason, cmd->state.rp.lrz_write_disabled_at_draw);
++}
++
+ template <chip CHIP>
+ static void
+ tu6_emit_lrz_buffer(struct tu_cs *cs, struct tu_image *depth_image)
+@@ -182,6 +222,7 @@ tu_lrz_init_state(struct tu_cmd_buffer *cmd,
+       return;
+ 
+    cmd->state.lrz.valid = true;
++   cmd->state.lrz.disable_write_for_rp = false;
+    cmd->state.lrz.prev_direction = TU_LRZ_UNKNOWN;
+    /* Be optimistic and unconditionally enable fast-clear in
+     * secondary cmdbufs and when reusing previous LRZ state.
+@@ -215,6 +256,7 @@ tu_lrz_init_secondary(struct tu_cmd_buffer *cmd,
+       return;
+ 
+    cmd->state.lrz.valid = true;
++   cmd->state.lrz.disable_write_for_rp = false;
+    cmd->state.lrz.prev_direction = TU_LRZ_UNKNOWN;
+    cmd->state.lrz.gpu_dir_tracking = has_gpu_tracking;
+ 
+@@ -277,6 +319,7 @@ tu_lrz_begin_renderpass(struct tu_cmd_buffer *cmd)
+ 
+    cmd->state.rp.lrz_disable_reason = "";
+    cmd->state.rp.lrz_disabled_at_draw = 0;
++   cmd->state.rp.lrz_write_disabled_at_draw = 0;
+ 
+    int lrz_img_count = 0;
+    for (unsigned i = 0; i < pass->attachment_count; i++) {
+@@ -643,7 +686,13 @@ void
+ tu_lrz_flush_valid_during_renderpass(struct tu_cmd_buffer *cmd,
+                                      struct tu_cs *cs)
+ {
+-   if (cmd->state.lrz.valid || cmd->state.lrz.disable_for_rp)
++   if (cmd->state.lrz.disable_for_rp)
++      return;
++
++   /* Even if state is valid, we cannot be sure that secondary
++    * command buffer has the same sticky disable_write_for_rp.
++    */
++   if (cmd->state.lrz.valid && !cmd->state.lrz.disable_write_for_rp)
+       return;
+ 
+    tu6_write_lrz_reg(cmd, cs, A6XX_GRAS_LRZ_DEPTH_VIEW(
+@@ -654,59 +703,28 @@ tu_lrz_flush_valid_during_renderpass(struct tu_cmd_buffer *cmd,
+ }
+ TU_GENX(tu_lrz_flush_valid_during_renderpass);
+ 
+-/* update lrz state based on stencil-test func:
+- *
+- * Conceptually the order of the pipeline is:
+- *
+- *
+- *   FS -> Alpha-Test  ->  Stencil-Test  ->  Depth-Test
+- *                              |                |
+- *                       if wrmask != 0     if wrmask != 0
+- *                              |                |
+- *                              v                v
+- *                        Stencil-Write      Depth-Write
+- *
+- * Because Stencil-Test can have side effects (Stencil-Write) prior
+- * to depth test, in this case we potentially need to disable early
+- * lrz-test. See:
+- *
+- * https://www.khronos.org/opengl/wiki/Per-Sample_Processing
++/* Returns true if stencil may be written when depth test fails.
++ * This could be either from stencil written on depth test fail itself,
++ * or stencil written on the stencil test failure where subsequent depth
++ * test may also fail.
+  */
+ static bool
+-tu6_stencil_op_lrz_allowed(struct A6XX_GRAS_LRZ_CNTL *gras_lrz_cntl,
+-                           VkCompareOp func,
+-                           bool stencil_write)
++tu6_stencil_written_on_depth_fail(struct vk_stencil_test_face_state *face)
+ {
+-   switch (func) {
++   switch (face->op.compare) {
+    case VK_COMPARE_OP_ALWAYS:
+-      /* nothing to do for LRZ, but for stencil test when stencil-
+-       * write is enabled, we need to disable lrz-test, since
+-       * conceptually stencil test and write happens before depth-test.
+-       */
+-      if (stencil_write) {
+-         return false;
+-      }
+-      break;
++      /* The stencil op always passes, no need to worry about failOp. */
++      return face->op.depth_fail != VK_STENCIL_OP_KEEP;
+    case VK_COMPARE_OP_NEVER:
+-      /* fragment never passes, disable lrz_write for this draw. */
+-      gras_lrz_cntl->lrz_write = false;
+-      break;
++      /* The stencil op always fails, so failOp will always be used. */
++      return face->op.fail != VK_STENCIL_OP_KEEP;
+    default:
+-      /* whether the fragment passes or not depends on result
+-       * of stencil test, which we cannot know when doing binning
+-       * pass.
+-       */
+-      gras_lrz_cntl->lrz_write = false;
+-      /* similarly to the VK_COMPARE_OP_ALWAYS case, if there are side-
+-       * effects from stencil test we need to disable lrz-test.
++      /* If the stencil test fails, depth may fail as well, so we can write
++       * stencil when the depth fails if failOp is not VK_STENCIL_OP_KEEP.
+        */
+-      if (stencil_write) {
+-         return false;
+-      }
+-      break;
++      return face->op.fail != VK_STENCIL_OP_KEEP ||
++             face->op.depth_fail != VK_STENCIL_OP_KEEP;
+    }
+-
+-   return true;
+ }
+ 
+ template <chip CHIP>
+@@ -746,9 +764,8 @@ tu6_calculate_lrz_state(struct tu_cmd_buffer *cmd,
+    gras_lrz_cntl.enable = true;
+    gras_lrz_cntl.lrz_write =
+       z_write_enable &&
+-      !reads_dest &&
+       !(fs->fs.lrz.status & TU_LRZ_FORCE_DISABLE_WRITE);
+-   gras_lrz_cntl.z_test_enable = z_write_enable;
++   gras_lrz_cntl.z_write_enable = z_write_enable;
+    gras_lrz_cntl.z_bounds_enable = z_bounds_enable;
+    gras_lrz_cntl.fc_enable = cmd->state.lrz.fast_clear;
+    gras_lrz_cntl.dir_write = cmd->state.lrz.gpu_dir_tracking;
+@@ -860,36 +877,40 @@ tu6_calculate_lrz_state(struct tu_cmd_buffer *cmd,
+    if (z_write_enable && lrz_direction != TU_LRZ_UNKNOWN)
+       cmd->state.lrz.prev_direction = lrz_direction;
+ 
+-   /* Invalidate LRZ and disable write if stencil test is enabled */
+-   bool stencil_test_enable = cmd->vk.dynamic_graphics_state.ds.stencil.test_enable;
+-   if (!disable_lrz && stencil_test_enable) {
+-      VkCompareOp stencil_front_compare_op = (VkCompareOp)
+-         cmd->vk.dynamic_graphics_state.ds.stencil.front.op.compare;
+-
+-      VkCompareOp stencil_back_compare_op = (VkCompareOp)
+-         cmd->vk.dynamic_graphics_state.ds.stencil.back.op.compare;
+-
+-      bool lrz_allowed = true;
+-      lrz_allowed = lrz_allowed && tu6_stencil_op_lrz_allowed(
+-                                      &gras_lrz_cntl, stencil_front_compare_op,
+-                                      cmd->state.stencil_front_write);
+-
+-      lrz_allowed = lrz_allowed && tu6_stencil_op_lrz_allowed(
+-                                      &gras_lrz_cntl, stencil_back_compare_op,
+-                                      cmd->state.stencil_back_write);
+-
+-      /* Without depth write it's enough to make sure that depth test
+-       * is executed after stencil test, so temporary disabling LRZ is enough.
++   if (cmd->vk.dynamic_graphics_state.ds.stencil.test_enable) {
++      /**
++       * Because the LRZ test runs first, failing the LRZ test may result in
++       * skipping the stencil test and subsequent stencil write. This is ok if
++       * stencil is only written when the depth test passes, because then the
++       * LRZ test will also pass, but if it may be written when the depth or
++       * stencil test fails then we need to disable the LRZ test for the draw.
+        */
+-      if (!lrz_allowed) {
+-         if (z_write_enable) {
+-            tu_lrz_disable_reason(cmd, "Stencil write");
+-            disable_lrz = true;
+-         } else {
+-            perf_debug(cmd->device, "Skipping LRZ due to stencil write");
+-            temporary_disable_lrz = true;
+-         }
++      bool writes_stencil_on_ds_fail =
++         cmd->state.stencil_front_write &&
++         tu6_stencil_written_on_depth_fail(
++            &cmd->vk.dynamic_graphics_state.ds.stencil.front);
++      writes_stencil_on_ds_fail |=
++         cmd->state.stencil_back_write &&
++         tu6_stencil_written_on_depth_fail(
++            &cmd->vk.dynamic_graphics_state.ds.stencil.back);
++
++      bool frag_may_be_killed_by_stencil =
++         !(cmd->vk.dynamic_graphics_state.ds.stencil.front.op.compare ==
++              VK_COMPARE_OP_ALWAYS &&
++           cmd->vk.dynamic_graphics_state.ds.stencil.back.op.compare ==
++              VK_COMPARE_OP_ALWAYS);
++
++      /* Stencil test happens after LRZ is written, so if stencil could kill
++       * the fragment - we cannot write LRZ.
++       */
++      if (!cmd->state.lrz.disable_write_for_rp &&
++          frag_may_be_killed_by_stencil) {
++         tu_lrz_write_disable_reason(cmd, "Stencil may kill fragments");
++         cmd->state.lrz.disable_write_for_rp = true;
+       }
++
++      if (writes_stencil_on_ds_fail)
++         temporary_disable_lrz = true;
+    }
+ 
+    /* Writing depth with blend enabled means we need to invalidate LRZ,
+@@ -914,14 +935,18 @@ tu6_calculate_lrz_state(struct tu_cmd_buffer *cmd,
+     * fragments from draw A which should be visible due to draw B.
+     */
+    if (reads_dest && z_write_enable && cmd->device->instance->conservative_lrz) {
+-      tu_lrz_disable_reason(cmd, "Depth write + blending");
+-      disable_lrz = true;
++      tu_lrz_write_disable_reason(cmd, "Depth write + blending");
++      cmd->state.lrz.disable_write_for_rp = true;
++      temporary_disable_lrz = true;
+    }
+ 
+    if (disable_lrz)
+       cmd->state.lrz.valid = false;
+ 
+-   if (temporary_disable_lrz || disable_lrz)
++   if (cmd->state.lrz.disable_write_for_rp)
++      gras_lrz_cntl.lrz_write = false;
++
++   if (temporary_disable_lrz)
+       gras_lrz_cntl.enable = false;
+ 
+    cmd->state.lrz.enabled = cmd->state.lrz.valid && gras_lrz_cntl.enable;
+diff --git a/src/freedreno/vulkan/tu_lrz.h b/src/freedreno/vulkan/tu_lrz.h
+index 01b1e08236141..ae7b79c933777 100644
+--- a/src/freedreno/vulkan/tu_lrz.h
++++ b/src/freedreno/vulkan/tu_lrz.h
+@@ -33,6 +33,10 @@ struct tu_lrz_state
+    VkClearValue depth_clear_value;
+    /* If LRZ is in invalid state we cannot use it until depth is cleared */
+    bool valid : 1;
++
++   /* Sticky for the RP duration */
++   bool disable_write_for_rp : 1;
++
+    bool disable_for_rp : 1;
+    /* Allows to temporary disable LRZ */
+    bool enabled : 1;
+diff --git a/src/freedreno/vulkan/tu_tracepoints.py b/src/freedreno/vulkan/tu_tracepoints.py
+index 287e251d93129..93acfc0f964ae 100644
+--- a/src/freedreno/vulkan/tu_tracepoints.py
++++ b/src/freedreno/vulkan/tu_tracepoints.py
+@@ -99,7 +99,8 @@ begin_end_tp('render_pass',
+               Arg(type='uint32_t',                              var='avgPerSampleBandwidth',                                c_format='%u'),
+               Arg(type='bool',                                  var='lrz',                                                  c_format='%s', to_prim_type='({} ? "true" : "false")'),
+               Arg(type='const char *',                          var='lrzDisableReason',                                     c_format='%s'),
+-              Arg(type='uint32_t',                              var='lrzDisabledAtDraw',                                    c_format='%u'),
++              Arg(type='int32_t',                               var='lrzDisabledAtDraw',                                    c_format='%d'),
++              Arg(type='int32_t',                               var='lrzWriteDisabledAtDraw',                               c_format='%d'),
+               Arg(type='uint32_t',                              var='lrzStatus', c_format='%s', to_prim_type='(fd_lrz_gpu_dir_to_str((enum fd_lrz_gpu_dir)({} & 0xff)))', is_indirect=True),])
+ 
+ 
+diff --git a/src/gallium/drivers/freedreno/a6xx/fd6_emit.cc b/src/gallium/drivers/freedreno/a6xx/fd6_emit.cc
+index 89ed01437d405..ead6cc9ec49fa 100644
+--- a/src/gallium/drivers/freedreno/a6xx/fd6_emit.cc
++++ b/src/gallium/drivers/freedreno/a6xx/fd6_emit.cc
+@@ -237,7 +237,7 @@ build_lrz(struct fd6_emit *emit) assert_dt
+             .enable = lrz.enable,
+             .lrz_write = lrz.write,
+             .greater = lrz.direction == FD_LRZ_GREATER,
+-            .z_test_enable = lrz.test,
++            .z_write_enable = lrz.test,
+             .z_bounds_enable = lrz.z_bounds_enable,
+          )
+       );
+@@ -254,7 +254,7 @@ build_lrz(struct fd6_emit *emit) assert_dt
+             .lrz_write = lrz.write,
+             .greater = lrz.direction == FD_LRZ_GREATER,
+             .fc_enable = false,
+-            .z_test_enable = lrz.test,
++            .z_write_enable = lrz.test,
+             .z_bounds_enable = lrz.z_bounds_enable,
+             .disable_on_wrong_dir = false,
+          )
+-- 
+GitLab
+
+
+From cb4888dc5245fd4f8af09669461bfa5e94e53cf7 Mon Sep 17 00:00:00 2001
+From: Danylo Piliaiev <dpiliaiev@igalia.com>
+Date: Thu, 27 Feb 2025 21:05:33 +0100
+Subject: [PATCH 2/2] tu: Use EARLY_Z also for stencil tests
+
+EARLY tests can test and write out stencil values.
+
+Signed-off-by: Danylo Piliaiev <dpiliaiev@igalia.com>
+---
+ src/freedreno/vulkan/tu_cmd_buffer.cc | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/src/freedreno/vulkan/tu_cmd_buffer.cc b/src/freedreno/vulkan/tu_cmd_buffer.cc
+index 06a9025fcc085..d8a72ad62a47c 100644
+--- a/src/freedreno/vulkan/tu_cmd_buffer.cc
++++ b/src/freedreno/vulkan/tu_cmd_buffer.cc
+@@ -5782,6 +5782,7 @@ tu6_build_depth_plane_z_mode(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
+ {
+    enum a6xx_ztest_mode zmode = A6XX_EARLY_Z;
+    bool depth_test_enable = cmd->vk.dynamic_graphics_state.ds.depth.test_enable;
++   bool stencil_test_enable = cmd->vk.dynamic_graphics_state.ds.stencil.test_enable;
+    bool depth_write = tu6_writes_depth(cmd, depth_test_enable);
+    bool stencil_write = tu6_writes_stencil(cmd);
+    const struct tu_shader *fs = cmd->state.shaders[MESA_SHADER_FRAGMENT];
+@@ -5799,6 +5800,7 @@ tu6_build_depth_plane_z_mode(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
+                  : A6XX_LATE_Z;
+    }
+ 
++   bool ds_test_enable = depth_test_enable || stencil_test_enable;
+    bool force_late_z = 
+       (subpass->depth_stencil_attachment.attachment != VK_ATTACHMENT_UNUSED &&
+        pass->attachments[subpass->depth_stencil_attachment.attachment].format
+@@ -5807,7 +5809,7 @@ tu6_build_depth_plane_z_mode(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
+       /* alpha-to-coverage can behave like a discard. */
+       cmd->vk.dynamic_graphics_state.ms.alpha_to_coverage_enable;
+    if ((force_late_z && !fs->variant->fs.early_fragment_tests) ||
+-       !depth_test_enable)
++       !ds_test_enable)
+       zmode = A6XX_LATE_Z;
+ 
+    /* User defined early tests take precedence above all else */
+-- 
+GitLab
+

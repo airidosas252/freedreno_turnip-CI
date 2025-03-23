@@ -1,0 +1,35 @@
+From fdb61536e2b6ab9dbe311c736f15729dfff2e52d Mon Sep 17 00:00:00 2001
+From: Connor Abbott <cwabbott0@gmail.com>
+Date: Fri, 14 Mar 2025 17:40:28 -0400
+Subject: [PATCH] tu: Fix layer_count with dynamic rendering + multiview
+
+With "classic" renderpasses, the VkFramebuffer's layerCount must be 1 if
+multiview is enabled. We accidentally rely on this to not disable GMEM
+for multiview, and possibly for other things too. Apparently the dynamic
+rendering equivalent, VkRenderingInfo::layerCount, can be anything when
+multiview is enabled, and some CTS tests set it to the number of views.
+Sanitize it when constructing the internal framebuffer for dynamic
+rendering.
+
+Cc: mesa-stable
+---
+ src/freedreno/vulkan/tu_device.cc | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/src/freedreno/vulkan/tu_device.cc b/src/freedreno/vulkan/tu_device.cc
+index 0221631cddacc..b5a10902c21bc 100644
+--- a/src/freedreno/vulkan/tu_device.cc
++++ b/src/freedreno/vulkan/tu_device.cc
+@@ -3327,7 +3327,8 @@ tu_setup_dynamic_framebuffer(struct tu_cmd_buffer *cmd_buffer,
+       pRenderingInfo->renderArea.extent.width;
+    framebuffer->height = pRenderingInfo->renderArea.offset.y +
+       pRenderingInfo->renderArea.extent.height;
+-   framebuffer->layers = pRenderingInfo->layerCount;
++   framebuffer->layers =
++      pRenderingInfo->viewMask != 0 ? 1 : pRenderingInfo->layerCount;
+ 
+    tu_framebuffer_tiling_config(framebuffer, cmd_buffer->device, pass);
+ }
+-- 
+GitLab
+

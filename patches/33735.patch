@@ -1,0 +1,670 @@
+From a4cb8f0607bf55104be688e5e507acd393041d3a Mon Sep 17 00:00:00 2001
+From: Danylo Piliaiev <dpiliaiev@igalia.com>
+Date: Tue, 25 Feb 2025 13:02:24 +0100
+Subject: [PATCH 1/5] freedreno/regs: Rename BINNING bit to FS_DISABLE in a few
+ regs
+
+In most cases it is used in binning, but it is also used when
+FS is empty in order to signal that FS shouldn't be invoked.
+
+Signed-off-by: Danylo Piliaiev <dpiliaiev@igalia.com>
+---
+ src/freedreno/registers/adreno/a6xx.xml           | 11 ++++-------
+ src/freedreno/vulkan/tu_clear_blit.cc             |  2 +-
+ src/freedreno/vulkan/tu_cmd_buffer.cc             |  2 +-
+ src/freedreno/vulkan/tu_shader.cc                 |  2 +-
+ src/gallium/drivers/freedreno/a6xx/fd6_gmem.cc    |  6 +++---
+ src/gallium/drivers/freedreno/a6xx/fd6_program.cc |  2 +-
+ 6 files changed, 11 insertions(+), 14 deletions(-)
+
+diff --git a/src/freedreno/registers/adreno/a6xx.xml b/src/freedreno/registers/adreno/a6xx.xml
+index d49919f6344c0..6fb957ff1da05 100644
+--- a/src/freedreno/registers/adreno/a6xx.xml
++++ b/src/freedreno/registers/adreno/a6xx.xml
+@@ -3542,8 +3542,7 @@ to upconvert to 32b float internally?
+ 	<reg32 offset="0x8801" name="RB_RENDER_CNTL" variants="A6XX" usage="rp_blit">
+ 		<bitfield name="CCUSINGLECACHELINESIZE" low="3" high="5"/>
+ 		<bitfield name="EARLYVIZOUTEN" pos="6" type="boolean"/>
+-		<!-- set during binning pass: -->
+-		<bitfield name="BINNING" pos="7" type="boolean"/>
++		<bitfield name="FS_DISABLE" pos="7" type="boolean"/>
+ 		<bitfield name="UNK8" low="8" high="10"/>
+ 		<bitfield name="RASTER_MODE" pos="8" type="a6xx_raster_mode"/>
+ 		<bitfield name="RASTER_DIRECTION" low="9" high="10" type="a6xx_raster_direction"/>
+@@ -3556,15 +3555,14 @@ to upconvert to 32b float internally?
+ 	</reg32>
+ 	<reg32 offset="0x8801" name="RB_RENDER_CNTL" variants="A7XX-" usage="rp_blit">
+ 		<bitfield name="EARLYVIZOUTEN" pos="6" type="boolean"/>
+-		<!-- set during binning pass: -->
+-		<bitfield name="BINNING" pos="7" type="boolean"/>
++		<bitfield name="FS_DISABLE" pos="7" type="boolean"/>
+ 		<bitfield name="RASTER_MODE" pos="8" type="a6xx_raster_mode"/>
+ 		<bitfield name="RASTER_DIRECTION" low="9" high="10" type="a6xx_raster_direction"/>
+ 		<bitfield name="CONSERVATIVERASEN" pos="11" type="boolean"/>
+ 		<bitfield name="INNERCONSERVATIVERASEN" pos="12" type="boolean"/>
+ 	</reg32>
+ 	<reg32 offset="0x8116" name="GRAS_SU_RENDER_CNTL" variants="A7XX-" usage="rp_blit">
+-		<bitfield name="BINNING" pos="7" type="boolean"/>
++		<bitfield name="FS_DISABLE" pos="7" type="boolean"/>
+ 	</reg32>
+ 
+ 	<reg32 offset="0x8802" name="RB_RAS_MSAA_CNTL" usage="rp_blit">
+@@ -5524,8 +5522,7 @@ to upconvert to 32b float internally?
+ 	<reg32 offset="0xa898" name="HLSQ_GS_CNTL" type="a6xx_hlsq_xs_cntl" variants="A7XX-" usage="rp_blit"/>
+ 
+ 	<reg32 offset="0xa9aa" name="HLSQ_FS_UNKNOWN_A9AA" variants="A7XX-" usage="rp_blit">
+-		<!-- Tentatively named, appears to disable consts being loaded via CP_LOAD_STATE6_FRAG -->
+-		<bitfield name="CONSTS_LOAD_DISABLE" pos="0" type="boolean"/>
++		<bitfield name="FS_DISABLE" pos="0" type="boolean"/>
+ 	</reg32>
+ 
+ 	<reg32 offset="0xa9ac" name="SP_DITHER_CNTL" variants="A7XX-" usage="cmd">
+diff --git a/src/freedreno/vulkan/tu_clear_blit.cc b/src/freedreno/vulkan/tu_clear_blit.cc
+index 2801ec4e8bd99..be98667473526 100644
+--- a/src/freedreno/vulkan/tu_clear_blit.cc
++++ b/src/freedreno/vulkan/tu_clear_blit.cc
+@@ -929,7 +929,7 @@ r3d_common(struct tu_cmd_buffer *cmd, struct tu_cs *cs, enum r3d_type type,
+    if (CHIP >= A7XX) {
+       tu_cs_emit_regs(cs, A6XX_GRAS_UNKNOWN_8110(0x2));
+ 
+-      tu_cs_emit_regs(cs, A7XX_HLSQ_FS_UNKNOWN_A9AA(.consts_load_disable = false));
++      tu_cs_emit_regs(cs, A7XX_HLSQ_FS_UNKNOWN_A9AA(.fs_disable = false));
+    }
+ 
+    /* REPL_MODE for varying with RECTLIST (2 vertices only) */
+diff --git a/src/freedreno/vulkan/tu_cmd_buffer.cc b/src/freedreno/vulkan/tu_cmd_buffer.cc
+index 33d1f1fdc62f0..a4b37e9d57b1a 100644
+--- a/src/freedreno/vulkan/tu_cmd_buffer.cc
++++ b/src/freedreno/vulkan/tu_cmd_buffer.cc
+@@ -642,7 +642,7 @@ tu6_emit_render_cntl<A6XX>(struct tu_cmd_buffer *cmd,
+    if (binning) {
+       if (no_track)
+          return;
+-      cntl |= A6XX_RB_RENDER_CNTL_BINNING;
++      cntl |= A6XX_RB_RENDER_CNTL_FS_DISABLE;
+    } else {
+       uint32_t mrts_ubwc_enable = 0;
+       for (uint32_t i = 0; i < subpass->color_count; ++i) {
+diff --git a/src/freedreno/vulkan/tu_shader.cc b/src/freedreno/vulkan/tu_shader.cc
+index 14aa5579b5558..4d522bdb949f7 100644
+--- a/src/freedreno/vulkan/tu_shader.cc
++++ b/src/freedreno/vulkan/tu_shader.cc
+@@ -2078,7 +2078,7 @@ tu6_emit_fs(struct tu_cs *cs,
+ 
+    if (CHIP >= A7XX) {
+       tu_cs_emit_regs(cs, A6XX_GRAS_UNKNOWN_8110(0x2));
+-      tu_cs_emit_regs(cs, A7XX_HLSQ_FS_UNKNOWN_A9AA(.consts_load_disable = false));
++      tu_cs_emit_regs(cs, A7XX_HLSQ_FS_UNKNOWN_A9AA(.fs_disable = false));
+    }
+ 
+    if (fs) {
+diff --git a/src/gallium/drivers/freedreno/a6xx/fd6_gmem.cc b/src/gallium/drivers/freedreno/a6xx/fd6_gmem.cc
+index 309ac5006b91c..7cf9e35a9a07d 100644
+--- a/src/gallium/drivers/freedreno/a6xx/fd6_gmem.cc
++++ b/src/gallium/drivers/freedreno/a6xx/fd6_gmem.cc
+@@ -496,14 +496,14 @@ update_render_cntl(struct fd_batch *batch, struct pipe_framebuffer_state *pfb,
+       OUT_REG(ring,
+          RB_RENDER_CNTL(
+             CHIP,
+-            .binning = binning,
++            .fs_disable = binning,
+             .raster_mode = TYPE_TILED,
+             .raster_direction = LR_TB
+          )
+       );
+       OUT_REG(ring,
+          A7XX_GRAS_SU_RENDER_CNTL(
+-            .binning = binning,
++            .fs_disable = binning,
+          )
+       );
+       return;
+@@ -534,7 +534,7 @@ update_render_cntl(struct fd_batch *batch, struct pipe_framebuffer_state *pfb,
+    struct fd_reg_pair rb_render_cntl = RB_RENDER_CNTL(
+          CHIP,
+          .ccusinglecachelinesize = 2,
+-         .binning = binning,
++         .fs_disable = binning,
+          .flag_depth = depth_ubwc_enable,
+          .flag_mrts = mrts_ubwc_enable,
+    );
+diff --git a/src/gallium/drivers/freedreno/a6xx/fd6_program.cc b/src/gallium/drivers/freedreno/a6xx/fd6_program.cc
+index ba9419607ea26..5798a503403a8 100644
+--- a/src/gallium/drivers/freedreno/a6xx/fd6_program.cc
++++ b/src/gallium/drivers/freedreno/a6xx/fd6_program.cc
+@@ -836,7 +836,7 @@ emit_vpc(struct fd_ringbuffer *ring, const struct program_builder *b)
+ 
+    if (CHIP >= A7XX) {
+       OUT_REG(ring, A6XX_GRAS_UNKNOWN_8110(0x2));
+-      OUT_REG(ring, A7XX_HLSQ_FS_UNKNOWN_A9AA(.consts_load_disable = false));
++      OUT_REG(ring, A7XX_HLSQ_FS_UNKNOWN_A9AA(.fs_disable = false));
+    }
+ 
+    OUT_PKT4(ring, REG_A6XX_VPC_CNTL_0, 1);
+-- 
+GitLab
+
+
+From 71fdf85a4a729a566b32413ad12acc2850b25e44 Mon Sep 17 00:00:00 2001
+From: Danylo Piliaiev <dpiliaiev@igalia.com>
+Date: Tue, 25 Feb 2025 13:40:37 +0100
+Subject: [PATCH 2/5] ir3: Detect empty fragment shaders
+
+Signed-off-by: Danylo Piliaiev <dpiliaiev@igalia.com>
+---
+ src/freedreno/ir3/ir3_compiler_nir.c | 15 +++++++++++++++
+ src/freedreno/ir3/ir3_shader.h       |  2 ++
+ 2 files changed, 17 insertions(+)
+
+diff --git a/src/freedreno/ir3/ir3_compiler_nir.c b/src/freedreno/ir3/ir3_compiler_nir.c
+index a1f7858176f96..5f64c0151a3ba 100644
+--- a/src/freedreno/ir3/ir3_compiler_nir.c
++++ b/src/freedreno/ir3/ir3_compiler_nir.c
+@@ -5511,6 +5511,17 @@ fixup_tg4(struct ir3_context *ctx)
+    }
+ }
+ 
++static bool
++is_empty(struct ir3 *ir)
++{
++   foreach_block (block, &ir->block_list) {
++      foreach_instr (instr, &block->instr_list) {
++         return instr->opc == OPC_END;
++      }
++   }
++   return true;
++}
++
+ static void
+ collect_tex_prefetches(struct ir3_context *ctx, struct ir3 *ir)
+ {
+@@ -6039,6 +6050,10 @@ ir3_compile_shader_nir(struct ir3_compiler *compiler,
+       so->constlen = MAX2(so->constlen, 8);
+    }
+ 
++   if (so->type == MESA_SHADER_FRAGMENT) {
++      so->empty = is_empty(ir) && so->num_sampler_prefetch == 0;
++   }
++
+    if (gl_shader_stage_is_compute(so->type)) {
+       so->cs.local_invocation_id =
+          ir3_find_sysval_regid(so, SYSTEM_VALUE_LOCAL_INVOCATION_ID);
+diff --git a/src/freedreno/ir3/ir3_shader.h b/src/freedreno/ir3/ir3_shader.h
+index 64ccc94918572..0d866d3f5326c 100644
+--- a/src/freedreno/ir3/ir3_shader.h
++++ b/src/freedreno/ir3/ir3_shader.h
+@@ -844,6 +844,8 @@ struct ir3_shader_variant {
+ 
+    bool post_depth_coverage;
+ 
++   bool empty;
++
+    /* Are we using split or merged register file? */
+    bool mergedregs;
+ 
+-- 
+GitLab
+
+
+From 08b1e0bfd2e5de3b96898e59e1f39c6f10aff1b7 Mon Sep 17 00:00:00 2001
+From: Danylo Piliaiev <dpiliaiev@igalia.com>
+Date: Tue, 25 Feb 2025 13:41:26 +0100
+Subject: [PATCH 3/5] tu/a7xx: Bypass invoking empty FS for D/S-only draw calls
+
+It is important to get D/S only draw calls to bypass invoking
+the fragment shader. The public documentation for Adreno states:
+  "Hint the driver to engage Fast-Z by using an empty fragment
+   shader and disabling frame buffer write masks for renderpasses
+   that modify Z values only."
+  "The GPU has a special mode that writes Z-only pixels at twice
+   the normal rate."
+
+We are promised a big performance improvement in this case.
+
+Signed-off-by: Danylo Piliaiev <dpiliaiev@igalia.com>
+---
+ src/freedreno/vulkan/tu_cmd_buffer.cc |  4 ++++
+ src/freedreno/vulkan/tu_pipeline.cc   | 19 +++++++++++++++++--
+ src/freedreno/vulkan/tu_shader.cc     |  2 +-
+ 3 files changed, 22 insertions(+), 3 deletions(-)
+
+diff --git a/src/freedreno/vulkan/tu_cmd_buffer.cc b/src/freedreno/vulkan/tu_cmd_buffer.cc
+index a4b37e9d57b1a..3e8145bea6f10 100644
+--- a/src/freedreno/vulkan/tu_cmd_buffer.cc
++++ b/src/freedreno/vulkan/tu_cmd_buffer.cc
+@@ -5802,6 +5802,10 @@ tu6_build_depth_plane_z_mode(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
+    if (fs->variant->fs.early_fragment_tests)
+       zmode = A6XX_EARLY_Z;
+ 
++   /* FS bypass requires early Z */
++   if (fs->variant->empty)
++      zmode = A6XX_EARLY_Z;
++
+    tu_cs_emit_pkt4(cs, REG_A6XX_GRAS_SU_DEPTH_PLANE_CNTL, 1);
+    tu_cs_emit(cs, A6XX_GRAS_SU_DEPTH_PLANE_CNTL_Z_MODE(zmode));
+ 
+diff --git a/src/freedreno/vulkan/tu_pipeline.cc b/src/freedreno/vulkan/tu_pipeline.cc
+index c2a98b50e5c99..6588246bc5365 100644
+--- a/src/freedreno/vulkan/tu_pipeline.cc
++++ b/src/freedreno/vulkan/tu_pipeline.cc
+@@ -3103,6 +3103,7 @@ uint32_t
+ tu6_rast_size(struct tu_device *dev,
+               const struct vk_rasterization_state *rs,
+               const struct vk_viewport_state *vp,
++              const struct tu_shader *fs,
+               bool multiview,
+               bool per_view_viewport)
+ {
+@@ -3118,6 +3119,7 @@ void
+ tu6_emit_rast(struct tu_cs *cs,
+               const struct vk_rasterization_state *rs,
+               const struct vk_viewport_state *vp,
++              const struct tu_shader *fs,
+               bool multiview,
+               bool per_view_viewport)
+ {
+@@ -3174,12 +3176,22 @@ tu6_emit_rast(struct tu_cs *cs,
+       bool conservative_ras_en =
+          rs->conservative_mode ==
+          VK_CONSERVATIVE_RASTERIZATION_MODE_OVERESTIMATE_EXT;
++      /* This is important to get D/S only draw calls to bypass invoking
++       * the fragment shader. The public documentation for Adreno states:
++       *  "Hint the driver to engage Fast-Z by using an empty fragment
++       *   shader and disabling frame buffer write masks for renderpasses
++       *   that modify Z values only."
++       *  "The GPU has a special mode that writes Z-only pixels at twice
++       *   the normal rate."
++       */
++      bool disable_fs = !fs || fs->variant->empty;
+ 
+       tu_cs_emit_regs(cs, RB_RENDER_CNTL(CHIP,
++            .fs_disable = disable_fs,
+             .raster_mode = TYPE_TILED,
+             .raster_direction = LR_TB,
+             .conservativerasen = conservative_ras_en));
+-      tu_cs_emit_regs(cs, A7XX_GRAS_SU_RENDER_CNTL());
++      tu_cs_emit_regs(cs, A7XX_GRAS_SU_RENDER_CNTL(.fs_disable = disable_fs));
+       tu_cs_emit_regs(cs,
+                       A6XX_PC_DGEN_SU_CONSERVATIVE_RAS_CNTL(conservative_ras_en));
+ 
+@@ -3616,6 +3628,7 @@ tu_pipeline_builder_emit_state(struct tu_pipeline_builder *builder,
+                    pipeline_contains_all_shader_state(pipeline),
+                    builder->graphics_state.rs,
+                    builder->graphics_state.vp,
++                   pipeline->shaders[MESA_SHADER_FRAGMENT],
+                    builder->graphics_state.rp->view_mask != 0,
+                    pipeline->program.per_view_viewport);
+    DRAW_STATE_COND(ds, TU_DYNAMIC_STATE_DS,
+@@ -3847,9 +3860,11 @@ tu_emit_draw_state(struct tu_cmd_buffer *cmd)
+    }
+    DRAW_STATE_COND(rast, TU_DYNAMIC_STATE_RAST,
+                    cmd->state.dirty & (TU_CMD_DIRTY_SUBPASS |
+-                                       TU_CMD_DIRTY_PER_VIEW_VIEWPORT),
++                                       TU_CMD_DIRTY_PER_VIEW_VIEWPORT |
++                                       TU_CMD_DIRTY_FS),
+                    &cmd->vk.dynamic_graphics_state.rs,
+                    &cmd->vk.dynamic_graphics_state.vp,
++                   cmd->state.shaders[MESA_SHADER_FRAGMENT],
+                    cmd->state.vk_rp.view_mask != 0,
+                    cmd->state.per_view_viewport);
+    DRAW_STATE_COND(ds, TU_DYNAMIC_STATE_DS,
+diff --git a/src/freedreno/vulkan/tu_shader.cc b/src/freedreno/vulkan/tu_shader.cc
+index 4d522bdb949f7..e78f167fb1a1a 100644
+--- a/src/freedreno/vulkan/tu_shader.cc
++++ b/src/freedreno/vulkan/tu_shader.cc
+@@ -2078,7 +2078,7 @@ tu6_emit_fs(struct tu_cs *cs,
+ 
+    if (CHIP >= A7XX) {
+       tu_cs_emit_regs(cs, A6XX_GRAS_UNKNOWN_8110(0x2));
+-      tu_cs_emit_regs(cs, A7XX_HLSQ_FS_UNKNOWN_A9AA(.fs_disable = false));
++      tu_cs_emit_regs(cs, A7XX_HLSQ_FS_UNKNOWN_A9AA(.fs_disable = !fs || fs->empty));
+    }
+ 
+    if (fs) {
+-- 
+GitLab
+
+
+From cacb049437e58ed9dde740d634bf3c61952ffd1f Mon Sep 17 00:00:00 2001
+From: Danylo Piliaiev <dpiliaiev@igalia.com>
+Date: Wed, 5 Mar 2025 17:11:51 +0100
+Subject: [PATCH 4/5] ir3: Detect FS that write only color without other side
+ effects
+
+Signed-off-by: Danylo Piliaiev <dpiliaiev@igalia.com>
+---
+ src/freedreno/ir3/ir3_compiler_nir.c | 3 +++
+ src/freedreno/ir3/ir3_shader.h       | 2 ++
+ 2 files changed, 5 insertions(+)
+
+diff --git a/src/freedreno/ir3/ir3_compiler_nir.c b/src/freedreno/ir3/ir3_compiler_nir.c
+index 5f64c0151a3ba..4e1f5dc20b164 100644
+--- a/src/freedreno/ir3/ir3_compiler_nir.c
++++ b/src/freedreno/ir3/ir3_compiler_nir.c
+@@ -6052,6 +6052,9 @@ ir3_compile_shader_nir(struct ir3_compiler *compiler,
+ 
+    if (so->type == MESA_SHADER_FRAGMENT) {
+       so->empty = is_empty(ir) && so->num_sampler_prefetch == 0;
++      so->writes_only_color = !ctx->s->info.writes_memory && !so->has_kill &&
++                              !so->writes_pos && !so->writes_smask &&
++                              !so->writes_stencilref;
+    }
+ 
+    if (gl_shader_stage_is_compute(so->type)) {
+diff --git a/src/freedreno/ir3/ir3_shader.h b/src/freedreno/ir3/ir3_shader.h
+index 0d866d3f5326c..4b997420ff679 100644
+--- a/src/freedreno/ir3/ir3_shader.h
++++ b/src/freedreno/ir3/ir3_shader.h
+@@ -845,6 +845,8 @@ struct ir3_shader_variant {
+    bool post_depth_coverage;
+ 
+    bool empty;
++   /* Doesn't have side-effects, no kill, no D/S write, etc. */
++   bool writes_only_color;
+ 
+    /* Are we using split or merged register file? */
+    bool mergedregs;
+-- 
+GitLab
+
+
+From 5ac2e01d5e24aed30bccc2982eff7fe927cafa73 Mon Sep 17 00:00:00 2001
+From: Danylo Piliaiev <dpiliaiev@igalia.com>
+Date: Wed, 5 Mar 2025 16:57:22 +0100
+Subject: [PATCH 5/5] tu: Disable FS in certain cases even if FS is not empty
+
+If FS doesn't have side-effects and color write mask is zero.
+
+Signed-off-by: Danylo Piliaiev <dpiliaiev@igalia.com>
+---
+ src/freedreno/vulkan/tu_cmd_buffer.cc |  10 ++-
+ src/freedreno/vulkan/tu_cmd_buffer.h  |   6 +-
+ src/freedreno/vulkan/tu_pipeline.cc   | 101 ++++++++++++++++++++++----
+ src/freedreno/vulkan/tu_pipeline.h    |   7 ++
+ src/freedreno/vulkan/tu_shader.cc     |   1 -
+ 5 files changed, 106 insertions(+), 19 deletions(-)
+
+diff --git a/src/freedreno/vulkan/tu_cmd_buffer.cc b/src/freedreno/vulkan/tu_cmd_buffer.cc
+index 3e8145bea6f10..c939259083365 100644
+--- a/src/freedreno/vulkan/tu_cmd_buffer.cc
++++ b/src/freedreno/vulkan/tu_cmd_buffer.cc
+@@ -3948,6 +3948,14 @@ tu_CmdBindPipeline(VkCommandBuffer commandBuffer,
+    }
+    cmd->state.pipeline_blend_lrz = pipeline->lrz_blend.valid;
+ 
++   if (pipeline->disable_fs.valid) {
++      if (cmd->state.disable_fs != pipeline->disable_fs.disable_fs) {
++         cmd->state.disable_fs = pipeline->disable_fs.disable_fs;
++         cmd->state.dirty |= TU_CMD_DIRTY_DISABLE_FS;
++      }
++   }
++   cmd->state.pipeline_disable_fs = pipeline->disable_fs.valid;
++
+    if (pipeline->bandwidth.valid)
+       cmd->state.bandwidth = pipeline->bandwidth;
+    cmd->state.pipeline_bandwidth = pipeline->bandwidth.valid;
+@@ -5803,7 +5811,7 @@ tu6_build_depth_plane_z_mode(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
+       zmode = A6XX_EARLY_Z;
+ 
+    /* FS bypass requires early Z */
+-   if (fs->variant->empty)
++   if (cmd->state.disable_fs)
+       zmode = A6XX_EARLY_Z;
+ 
+    tu_cs_emit_pkt4(cs, REG_A6XX_GRAS_SU_DEPTH_PLANE_CNTL, 1);
+diff --git a/src/freedreno/vulkan/tu_cmd_buffer.h b/src/freedreno/vulkan/tu_cmd_buffer.h
+index 958166eb36ac9..45b37874b87d5 100644
+--- a/src/freedreno/vulkan/tu_cmd_buffer.h
++++ b/src/freedreno/vulkan/tu_cmd_buffer.h
+@@ -74,8 +74,9 @@ enum tu_cmd_dirty_bits
+    TU_CMD_DIRTY_FEEDBACK_LOOPS = BIT(13),
+    TU_CMD_DIRTY_FS = BIT(14),
+    TU_CMD_DIRTY_SHADING_RATE = BIT(15),
++   TU_CMD_DIRTY_DISABLE_FS = BIT(16),
+    /* all draw states were disabled and need to be re-enabled: */
+-   TU_CMD_DIRTY_DRAW_STATE = BIT(16)
++   TU_CMD_DIRTY_DRAW_STATE = BIT(17)
+ };
+ 
+ /* There are only three cache domains we have to care about: the CCU, or
+@@ -514,6 +515,7 @@ struct tu_cmd_state
+    bool predication_active;
+    bool msaa_disable;
+    bool blend_reads_dest;
++   bool disable_fs;
+    bool stencil_front_write;
+    bool stencil_back_write;
+    bool pipeline_sysmem_single_prim_mode;
+@@ -527,7 +529,7 @@ struct tu_cmd_state
+    bool pipeline_reads_shading_rate;
+    bool pipeline_accesses_smask;
+ 
+-   bool pipeline_blend_lrz, pipeline_bandwidth;
++   bool pipeline_blend_lrz, pipeline_bandwidth, pipeline_disable_fs;
+    uint32_t pipeline_draw_states;
+ 
+    /* VK_QUERY_PIPELINE_STATISTIC_CLIPPING_INVOCATIONS_BIT and
+diff --git a/src/freedreno/vulkan/tu_pipeline.cc b/src/freedreno/vulkan/tu_pipeline.cc
+index 6588246bc5365..354cf68f6f0cc 100644
+--- a/src/freedreno/vulkan/tu_pipeline.cc
++++ b/src/freedreno/vulkan/tu_pipeline.cc
+@@ -2109,6 +2109,9 @@ tu_pipeline_builder_parse_libraries(struct tu_pipeline_builder *builder,
+          pipeline->prim_order = library->base.prim_order;
+       }
+ 
++      if (library->base.disable_fs.valid)
++         pipeline->disable_fs = library->base.disable_fs;
++
+       pipeline->set_state_mask |= library->base.set_state_mask;
+ 
+       u_foreach_bit (i, library->base.set_state_mask) {
+@@ -2898,6 +2901,52 @@ tu_calc_bandwidth(struct tu_bandwidth *bandwidth,
+    }
+ }
+ 
++static const enum mesa_vk_dynamic_graphics_state tu_disable_fs_state[] = {
++   MESA_VK_DYNAMIC_CB_ATTACHMENT_COUNT,
++   MESA_VK_DYNAMIC_CB_COLOR_WRITE_ENABLES,
++   MESA_VK_DYNAMIC_CB_WRITE_MASKS,
++   MESA_VK_DYNAMIC_MS_ALPHA_TO_COVERAGE_ENABLE,
++};
++
++static bool
++tu_calc_disable_fs(const struct vk_color_blend_state *cb,
++                   const struct vk_render_pass_state *rp,
++                   bool alpha_to_coverage_enable,
++                   const struct tu_shader *fs)
++{
++   if (alpha_to_coverage_enable)
++      return false;
++   if (fs && !fs->variant->writes_only_color)
++      return false;
++
++   bool has_enabled_attachments = false;
++   for (unsigned i = 0; i < cb->attachment_count; i++) {
++      if (rp->color_attachment_formats[i] == VK_FORMAT_UNDEFINED)
++         continue;
++
++      const struct vk_color_blend_attachment_state *att = &cb->attachments[i];
++      if ((cb->color_write_enables & (1u << i)) && att->write_mask != 0) {
++         has_enabled_attachments = true;
++         break;
++      }
++   }
++
++   return !fs || fs->variant->empty ||
++          (fs->variant->writes_only_color && !has_enabled_attachments);
++}
++
++static void
++tu_emit_disable_fs(struct tu_disable_fs *disable_fs,
++                   const struct vk_color_blend_state *cb,
++                   const struct vk_render_pass_state *rp,
++                   bool alpha_to_coverage_enable,
++                   const struct tu_shader *fs)
++{
++   disable_fs->disable_fs =
++      tu_calc_disable_fs(cb, rp, alpha_to_coverage_enable, fs);
++   disable_fs->valid = true;
++}
++
+ /* Return true if the blend state reads the color attachments. */
+ static bool
+ tu6_calc_blend_lrz(const struct vk_color_blend_state *cb,
+@@ -3103,14 +3152,14 @@ uint32_t
+ tu6_rast_size(struct tu_device *dev,
+               const struct vk_rasterization_state *rs,
+               const struct vk_viewport_state *vp,
+-              const struct tu_shader *fs,
+               bool multiview,
+-              bool per_view_viewport)
++              bool per_view_viewport,
++              bool disable_fs)
+ {
+    if (CHIP == A6XX) {
+       return 15 + (dev->physical_device->info->a6xx.has_legacy_pipeline_shading_rate ? 8 : 0);
+    } else {
+-      return 25;
++      return 27;
+    }
+ }
+ 
+@@ -3119,9 +3168,9 @@ void
+ tu6_emit_rast(struct tu_cs *cs,
+               const struct vk_rasterization_state *rs,
+               const struct vk_viewport_state *vp,
+-              const struct tu_shader *fs,
+               bool multiview,
+-              bool per_view_viewport)
++              bool per_view_viewport,
++              bool disable_fs)
+ {
+    enum a5xx_line_mode line_mode =
+       rs->line.mode == VK_LINE_RASTERIZATION_MODE_BRESENHAM_KHR ?
+@@ -3184,14 +3233,14 @@ tu6_emit_rast(struct tu_cs *cs,
+        *  "The GPU has a special mode that writes Z-only pixels at twice
+        *   the normal rate."
+        */
+-      bool disable_fs = !fs || fs->variant->empty;
+-
+       tu_cs_emit_regs(cs, RB_RENDER_CNTL(CHIP,
+             .fs_disable = disable_fs,
+             .raster_mode = TYPE_TILED,
+             .raster_direction = LR_TB,
+             .conservativerasen = conservative_ras_en));
+       tu_cs_emit_regs(cs, A7XX_GRAS_SU_RENDER_CNTL(.fs_disable = disable_fs));
++      tu_cs_emit_regs(cs, A7XX_HLSQ_FS_UNKNOWN_A9AA(.fs_disable = disable_fs));
++
+       tu_cs_emit_regs(cs,
+                       A6XX_PC_DGEN_SU_CONSERVATIVE_RAS_CNTL(conservative_ras_en));
+ 
+@@ -3607,6 +3656,13 @@ tu_pipeline_builder_emit_state(struct tu_pipeline_builder *builder,
+    if (EMIT_STATE(bandwidth, attachments_valid))
+       tu_calc_bandwidth(&pipeline->bandwidth, cb,
+                         builder->graphics_state.rp);
++   if (EMIT_STATE(
++          disable_fs,
++          attachments_valid && pipeline_contains_all_shader_state(pipeline)))
++      tu_emit_disable_fs(&pipeline->disable_fs, cb,
++                         builder->graphics_state.rp,
++                         builder->graphics_state.ms->alpha_to_coverage_enable,
++                         pipeline->shaders[MESA_SHADER_FRAGMENT]);
+    DRAW_STATE(blend_constants, TU_DYNAMIC_STATE_BLEND_CONSTANTS, cb);
+ 
+    if (attachments_valid &&
+@@ -3625,12 +3681,12 @@ tu_pipeline_builder_emit_state(struct tu_pipeline_builder *builder,
+       BITSET_CLEAR(remove, MESA_VK_DYNAMIC_CB_BLEND_CONSTANTS);
+    }
+    DRAW_STATE_COND(rast, TU_DYNAMIC_STATE_RAST,
+-                   pipeline_contains_all_shader_state(pipeline),
+-                   builder->graphics_state.rs,
+-                   builder->graphics_state.vp,
+-                   pipeline->shaders[MESA_SHADER_FRAGMENT],
++                   pipeline_contains_all_shader_state(pipeline) &&
++                      pipeline->disable_fs.valid,
++                   builder->graphics_state.rs, builder->graphics_state.vp,
+                    builder->graphics_state.rp->view_mask != 0,
+-                   pipeline->program.per_view_viewport);
++                   pipeline->program.per_view_viewport,
++                   pipeline->disable_fs.disable_fs);
+    DRAW_STATE_COND(ds, TU_DYNAMIC_STATE_DS,
+               attachments_valid,
+               builder->graphics_state.ds,
+@@ -3845,6 +3901,21 @@ tu_emit_draw_state(struct tu_cmd_buffer *cmd)
+        (EMIT_STATE(bandwidth) || (cmd->state.dirty & TU_CMD_DIRTY_SUBPASS)))
+       tu_calc_bandwidth(&cmd->state.bandwidth, &cmd->vk.dynamic_graphics_state.cb,
+                         &cmd->state.vk_rp);
++
++   if (!cmd->state.pipeline_disable_fs &&
++       (EMIT_STATE(disable_fs) ||
++        (cmd->state.dirty & TU_CMD_DIRTY_SUBPASS))) {
++      bool disable_fs = tu_calc_disable_fs(
++         &cmd->vk.dynamic_graphics_state.cb, &cmd->state.vk_rp,
++         cmd->vk.dynamic_graphics_state.ms.alpha_to_coverage_enable,
++         cmd->state.shaders[MESA_SHADER_FRAGMENT]);
++
++      if (disable_fs != cmd->state.disable_fs) {
++         cmd->state.disable_fs = disable_fs;
++         cmd->state.dirty |= TU_CMD_DIRTY_DISABLE_FS;
++      }
++   }
++
+    DRAW_STATE(blend_constants, VK_DYNAMIC_STATE_BLEND_CONSTANTS,
+               &cmd->vk.dynamic_graphics_state.cb);
+ 
+@@ -3861,12 +3932,12 @@ tu_emit_draw_state(struct tu_cmd_buffer *cmd)
+    DRAW_STATE_COND(rast, TU_DYNAMIC_STATE_RAST,
+                    cmd->state.dirty & (TU_CMD_DIRTY_SUBPASS |
+                                        TU_CMD_DIRTY_PER_VIEW_VIEWPORT |
+-                                       TU_CMD_DIRTY_FS),
++                                       TU_CMD_DIRTY_DISABLE_FS),
+                    &cmd->vk.dynamic_graphics_state.rs,
+                    &cmd->vk.dynamic_graphics_state.vp,
+-                   cmd->state.shaders[MESA_SHADER_FRAGMENT],
+                    cmd->state.vk_rp.view_mask != 0,
+-                   cmd->state.per_view_viewport);
++                   cmd->state.per_view_viewport,
++                   cmd->state.disable_fs);
+    DRAW_STATE_COND(ds, TU_DYNAMIC_STATE_DS,
+               cmd->state.dirty & TU_CMD_DIRTY_SUBPASS,
+               &cmd->vk.dynamic_graphics_state.ds,
+diff --git a/src/freedreno/vulkan/tu_pipeline.h b/src/freedreno/vulkan/tu_pipeline.h
+index 5499b58bd3872..f16fed7d8c1d9 100644
+--- a/src/freedreno/vulkan/tu_pipeline.h
++++ b/src/freedreno/vulkan/tu_pipeline.h
+@@ -52,6 +52,12 @@ struct tu_bandwidth
+    bool valid;
+ };
+ 
++struct tu_disable_fs
++{
++   bool disable_fs;
++   bool valid;
++};
++
+ struct tu_nir_shaders
+ {
+    struct vk_pipeline_cache_object base;
+@@ -171,6 +177,7 @@ struct tu_pipeline
+ 
+    struct tu_lrz_blend lrz_blend;
+    struct tu_bandwidth bandwidth;
++   struct tu_disable_fs disable_fs;
+ 
+    void *executables_mem_ctx;
+    /* tu_pipeline_executable */
+diff --git a/src/freedreno/vulkan/tu_shader.cc b/src/freedreno/vulkan/tu_shader.cc
+index e78f167fb1a1a..e9c5276034005 100644
+--- a/src/freedreno/vulkan/tu_shader.cc
++++ b/src/freedreno/vulkan/tu_shader.cc
+@@ -2078,7 +2078,6 @@ tu6_emit_fs(struct tu_cs *cs,
+ 
+    if (CHIP >= A7XX) {
+       tu_cs_emit_regs(cs, A6XX_GRAS_UNKNOWN_8110(0x2));
+-      tu_cs_emit_regs(cs, A7XX_HLSQ_FS_UNKNOWN_A9AA(.fs_disable = !fs || fs->empty));
+    }
+ 
+    if (fs) {
+-- 
+GitLab
+
