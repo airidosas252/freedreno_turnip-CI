@@ -7,10 +7,11 @@ nocolor='\033[0m'
 deps="meson ninja patchelf unzip curl pip flex bison zip"
 workdir="$(pwd)/turnip_workdir"
 magiskdir="$workdir/turnip_module"
+patchdir="$(pwd)/patches"
 ndkver="android-ndk-r28"
 ndk="$workdir/$ndkver/toolchains/llvm/prebuilt/linux-x86_64/bin"
 sdkver="34"
-mesasrc="https://gitlab.freedesktop.org/mesa/mesa/-/archive/main/mesa-main.zip"
+mesasrc="https://gitlab.freedesktop.org/mesa/mesa.git"
 
 clear
 
@@ -43,6 +44,7 @@ check_deps(){
 
 	echo "Installing python Mako dependency (if missing) ..." $'\n'
 		pip install mako &> /dev/null
+  		apt install git &> /dev/null
 }
 
 prepare_workdir(){
@@ -53,12 +55,15 @@ prepare_workdir(){
 		curl https://dl.google.com/android/repository/"$ndkver"-linux.zip --output "$ndkver"-linux.zip &> /dev/null
 	echo "Exracting android-ndk ..." $'\n'
 		unzip "$ndkver"-linux.zip &> /dev/null
-
-	echo "Downloading mesa source ..." $'\n'
-		curl "$mesasrc" --output mesa-main.zip &> /dev/null
-	echo "Exracting mesa source ..." $'\n'
-		unzip mesa-main.zip &> /dev/null
+	echo "Cloning into mesa source ..." $'\n'
+		git clone "$mesasrc" mesa-main --depth=1 &> /dev/null
 		cd mesa-main
+  	echo "Patching Mesa with available patches..." $'\n'
+   		for patch in "$patchdir"/*.patch; do
+    		echo "Applying $patch..."
+    		patch -p1 < "$patch" || { echo "Failed to apply $patch"; exit 1; }
+	done
+   		
 }
 
 
