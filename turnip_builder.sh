@@ -8,9 +8,9 @@ deps="meson ninja patchelf unzip curl pip flex bison zip"
 workdir="$(pwd)/turnip_workdir"
 magiskdir="$workdir/turnip_module"
 patchdir="$(pwd)/patches"
-ndkver="android-ndk-r28"
+ndkver="android-ndk-r29-beta1"
 ndk="$workdir/$ndkver/toolchains/llvm/prebuilt/linux-x86_64/bin"
-sdkver="34"
+sdkver="35"
 mesasrc="https://gitlab.freedesktop.org/mesa/mesa.git"
 
 clear
