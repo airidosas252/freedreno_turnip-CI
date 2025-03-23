@@ -117,6 +117,10 @@ EOF
 		meson setup build-android-aarch64 \
 			--cross-file "android-aarch64.txt" \
 			--native-file "native.txt" \
+			-Dvalgrind=disabled \
+   			-Db_ndebug=true \
+   			-Dmicrosoft-clc=disabled \
+      			-Dlibunwind=disabled \
 			-Dbuildtype=release \
 			-Dplatforms=android \
 			-Dplatform-sdk-version="$sdkver" \
