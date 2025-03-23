@@ -58,11 +58,11 @@ prepare_workdir(){
 	echo "Cloning into mesa source ..." $'\n'
 		git clone "$mesasrc" mesa-main --depth=1 &> /dev/null
 		cd mesa-main
-  	echo "Patching Mesa with available patches..." $'\n'
-   		for patch in "$patchdir"/*.patch; do
-    		echo "Applying $patch..."
-    		patch -p1 < "$patch" || { echo "Failed to apply $patch"; exit 1; }
-	done
+  	#echo "Patching Mesa with available patches..." $'\n'
+   		#for patch in "$patchdir"/*.patch; do
+    		#echo "Applying $patch..."
+    		#patch -p1 < "$patch" || { echo "Failed to apply $patch"; exit 1; }
+	#done
    		
 }
 
