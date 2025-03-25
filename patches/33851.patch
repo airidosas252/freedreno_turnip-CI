@@ -1,4 +1,4 @@
-From 298b41a370b1b2c8689e58d1b0433d03676c9674 Mon Sep 17 00:00:00 2001
+From 1fd432a4c1e19b4b89692336fdf9f8ae4ec559e5 Mon Sep 17 00:00:00 2001
 From: Danylo Piliaiev <dpiliaiev@igalia.com>
 Date: Wed, 26 Feb 2025 21:44:53 +0100
 Subject: [PATCH 1/2] tu/lrz: Improve LRZ around stencil tests and reads_dest
@@ -31,11 +31,11 @@ Signed-off-by: Danylo Piliaiev <dpiliaiev@igalia.com>
  src/freedreno/registers/adreno/a6xx.xml       |   2 +-
  src/freedreno/vulkan/tu_cmd_buffer.cc         |  14 +-
  src/freedreno/vulkan/tu_cmd_buffer.h          |   1 +
- src/freedreno/vulkan/tu_lrz.cc                | 203 ++++++++++--------
+ src/freedreno/vulkan/tu_lrz.cc                | 202 ++++++++++--------
  src/freedreno/vulkan/tu_lrz.h                 |   4 +
  src/freedreno/vulkan/tu_tracepoints.py        |   3 +-
  .../drivers/freedreno/a6xx/fd6_emit.cc        |   4 +-
- 7 files changed, 137 insertions(+), 94 deletions(-)
+ 7 files changed, 136 insertions(+), 94 deletions(-)
 
 diff --git a/src/freedreno/registers/adreno/a6xx.xml b/src/freedreno/registers/adreno/a6xx.xml
 index d49919f6344c0..669e4955444cd 100644
@@ -100,7 +100,7 @@ index 958166eb36ac9..ddfe7dade91cb 100644
     const char *gmem_disable_reason;
  };
 diff --git a/src/freedreno/vulkan/tu_lrz.cc b/src/freedreno/vulkan/tu_lrz.cc
-index 877762e9483eb..43bce395b2b01 100644
+index 877762e9483eb..9c352346fc34e 100644
 --- a/src/freedreno/vulkan/tu_lrz.cc
 +++ b/src/freedreno/vulkan/tu_lrz.cc
 @@ -15,16 +15,47 @@
@@ -301,7 +301,7 @@ index 877762e9483eb..43bce395b2b01 100644
     gras_lrz_cntl.z_bounds_enable = z_bounds_enable;
     gras_lrz_cntl.fc_enable = cmd->state.lrz.fast_clear;
     gras_lrz_cntl.dir_write = cmd->state.lrz.gpu_dir_tracking;
-@@ -860,36 +877,40 @@ tu6_calculate_lrz_state(struct tu_cmd_buffer *cmd,
+@@ -860,36 +877,39 @@ tu6_calculate_lrz_state(struct tu_cmd_buffer *cmd,
     if (z_write_enable && lrz_direction != TU_LRZ_UNKNOWN)
        cmd->state.lrz.prev_direction = lrz_direction;
  
@@ -326,8 +326,7 @@ index 877762e9483eb..43bce395b2b01 100644
 -      /* Without depth write it's enough to make sure that depth test
 -       * is executed after stencil test, so temporary disabling LRZ is enough.
 +   if (cmd->vk.dynamic_graphics_state.ds.stencil.test_enable) {
-+      /**
-+       * Because the LRZ test runs first, failing the LRZ test may result in
++      /* Because the LRZ test runs first, failing the LRZ test may result in
 +       * skipping the stencil test and subsequent stencil write. This is ok if
 +       * stencil is only written when the depth test passes, because then the
 +       * LRZ test will also pass, but if it may be written when the depth or
@@ -370,7 +369,7 @@ index 877762e9483eb..43bce395b2b01 100644
     }
  
     /* Writing depth with blend enabled means we need to invalidate LRZ,
-@@ -914,14 +935,18 @@ tu6_calculate_lrz_state(struct tu_cmd_buffer *cmd,
+@@ -914,14 +934,18 @@ tu6_calculate_lrz_state(struct tu_cmd_buffer *cmd,
      * fragments from draw A which should be visible due to draw B.
      */
     if (reads_dest && z_write_enable && cmd->device->instance->conservative_lrz) {
@@ -447,7 +446,7 @@ index 89ed01437d405..ead6cc9ec49fa 100644
 GitLab
 
 
-From cb4888dc5245fd4f8af09669461bfa5e94e53cf7 Mon Sep 17 00:00:00 2001
+From 6884976031b55750d24665225b97bdc6b42e61d9 Mon Sep 17 00:00:00 2001
 From: Danylo Piliaiev <dpiliaiev@igalia.com>
 Date: Thu, 27 Feb 2025 21:05:33 +0100
 Subject: [PATCH 2/2] tu: Use EARLY_Z also for stencil tests
