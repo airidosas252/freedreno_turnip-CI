@@ -8,6 +8,7 @@ deps="meson ninja patchelf unzip curl pip flex bison zip"
 workdir="$(pwd)/turnip_workdir"
 magiskdir="$workdir/turnip_module"
 patchdir="$(pwd)/patches"
+fixesdir="$(pwd)/fixes"
 ndkver="android-ndk-r29-beta1"
 ndk="$workdir/$ndkver/toolchains/llvm/prebuilt/linux-x86_64/bin"
 sdkver="35"
@@ -62,6 +63,11 @@ prepare_workdir(){
    		for patch in "$patchdir"/*.patch; do
     		echo "Applying $patch..."
     		patch -p1 < "$patch" || { echo "Failed to apply $patch"; exit 1; }
+	done
+        echo "Revert some patches..." $'\n'
+   		for patch in "$fixesdir"/*.patch; do
+    		echo "Reverting $patch..."
+    		patch -p1 -R < "$patch" || { echo "Failed to revert $patch"; exit 1; }
 	done
    		
 }
