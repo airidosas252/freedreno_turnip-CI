@@ -1,0 +1,81 @@
+From 0342d34bdbb0a8bbdac78679d0497361628fa65c Mon Sep 17 00:00:00 2001
+From: Mark Collins <mark@igalia.com>
+Date: Wed, 5 Mar 2025 08:59:55 +0000
+Subject: [PATCH] tu/kgsl: Remove zero CB queue submission fast path
+
+The fast path for kgsl_queue_submit when there are no command buffers
+and only sync objects led to breakage for two reasons:
+* The fast path was not properly handling duplication of the merged sync
+  object assigned to signalled `kgsl_syncobj`(s), which could lead to
+  multiple `kgsl_syncobj`s owning the same FD and consequently issues
+  such as double close of that FD leading to UB. This is fixed by moving
+  to the slow path as it always produces a timestamp sync object which
+  can be trivially duplicated.
+* The Vulkan specification requires that drivers strictly follow the
+  order of submission of command buffers and consequently the order of
+  semaphore signal/wait operations. Since no submission was being made
+  to the kernel, subsequent submissions could be executed without waiting
+  for wait/signal operations from previous submissions to complete.
+
+As both of these issues are fixed by moving to the slow path, this patch
+removes the fast path in favor of the more correct slow path.
+
+Signed-off-by: Mark Collins <mark@igalia.com>
+Part-of: <https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/33894>
+---
+ src/freedreno/vulkan/tu_knl_kgsl.cc | 39 -----------------------------
+ 1 file changed, 39 deletions(-)
+
+diff --git a/src/freedreno/vulkan/tu_knl_kgsl.cc b/src/freedreno/vulkan/tu_knl_kgsl.cc
+index 83cd9ed1da3ac..bdf515d4cce53 100644
+--- a/src/freedreno/vulkan/tu_knl_kgsl.cc
++++ b/src/freedreno/vulkan/tu_knl_kgsl.cc
+@@ -1089,45 +1089,6 @@ kgsl_queue_submit(struct tu_queue *queue, void *_submit,
+    uint64_t start_ts = tu_perfetto_begin_submit();
+ #endif
+ 
+-   if (submit->commands.size == 0) {
+-      const struct kgsl_syncobj *wait_semaphores[wait_count + 1];
+-      for (uint32_t i = 0; i < wait_count; i++) {
+-         wait_semaphores[i] = &container_of(waits[i].sync,
+-                                            struct vk_kgsl_syncobj, vk)
+-                                  ->syncobj;
+-      }
+-
+-      struct kgsl_syncobj last_submit_sync;
+-      if (queue->fence >= 0)
+-         last_submit_sync = (struct kgsl_syncobj) {
+-            .state = KGSL_SYNCOBJ_STATE_TS,
+-            .queue = queue,
+-            .timestamp = queue->fence,
+-         };
+-      else
+-         last_submit_sync = (struct kgsl_syncobj) {
+-            .state = KGSL_SYNCOBJ_STATE_SIGNALED,
+-         };
+-
+-      wait_semaphores[wait_count] = &last_submit_sync;
+-
+-      struct kgsl_syncobj wait_sync =
+-         kgsl_syncobj_merge(wait_semaphores, wait_count + 1);
+-      assert(wait_sync.state !=
+-             KGSL_SYNCOBJ_STATE_UNSIGNALED); // Would wait forever
+-
+-      for (uint32_t i = 0; i < signal_count; i++) {
+-         struct kgsl_syncobj *signal_sync =
+-            &container_of(signals[i].sync, struct vk_kgsl_syncobj, vk)
+-                ->syncobj;
+-
+-         kgsl_syncobj_reset(signal_sync);
+-         *signal_sync = wait_sync;
+-      }
+-
+-      return VK_SUCCESS;
+-   }
+-
+    VkResult result = VK_SUCCESS;
+ 
+    if (u_trace_submission_data) {
+-- 
+GitLab
+
